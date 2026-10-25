@@ -26,8 +26,8 @@ jobs:
       - name: Install VitaSDK and packages
         run: |
           set -e
-          SDK_URL=$(wget -qO- https://github.com/vitasdk/vita-headers/raw/master/.travis.d/last_built_toolchain.py | python3 - master linux)
-          echo "Downloading VitaSDK: $SDK_URL"
+          # Pinned: the "latest toolchain" lookup hits the anonymous GitHub API rate limit on shared runners.
+          SDK_URL=https://github.com/vitasdk/autobuilds/releases/download/master-linux-v2.540/vitasdk-x86_64-linux-gnu-2026-05-24_12-05-02.tar.bz2
           mkdir -p $VITASDK
           wget -qO- "$SDK_URL" | tar xj -C $VITASDK --strip-components=1
           export PATH=$VITASDK/bin:$PATH
