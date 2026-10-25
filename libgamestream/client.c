@@ -39,6 +39,7 @@
 #include <openssl/x509.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
+#include <psp2/kernel/threadmgr.h>
 
 #include "../src/debug.h"
 
@@ -566,7 +567,7 @@ int gs_pair(PSERVER_DATA server, char* pin) {
   RAND_bytes(client_secret_data, sizeof(client_secret_data));
 
   const ASN1_BIT_STRING *asnSignature;
-  X509_get0_signature(&asnSignature, NULL, cert);
+  X509_get0_signature((void *)&asnSignature, NULL, cert);
 
   char challenge_response[16 + SIGNATURE_LEN + sizeof(client_secret_data)];
   char challenge_response_hash[32];

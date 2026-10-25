@@ -5,6 +5,8 @@
 #include <string.h>
 #include "../keyboardsystem.h"
 #include "../connection.h"
+#include "../debug.h"
+#include <psp2/kernel/threadmgr.h>
 
 // Devuelve true si se ejecutó un acceso directo y se debe limpiar el input
 bool process_physical_shortcuts(const SceCtrlData* pad, const SceCtrlData* pad_old) {

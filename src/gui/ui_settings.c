@@ -9,6 +9,7 @@
 #include "../video/vita.h"
 #include "../debug.h"
 #include "../input/touchabsolute.h"
+#include "ui_keyboard.h"
 
 #include <assert.h>
 #include <stdio.h>
