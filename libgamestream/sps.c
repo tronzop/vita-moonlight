@@ -19,6 +19,8 @@
 
 #include "sps.h"
 
+#include <stdbool.h>
+
 #include "h264_stream.h"
 
 static h264_stream_t* h264_stream;
@@ -45,13 +47,17 @@ void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset) 
   // Some decoders rely on H264 level to decide how many buffers are needed
   // Since we only need one frame buffered, we'll set level as low as we can
   // for known resolution combinations. Otherwise leave the profile alone (currently 5.0)
-  if (initial_width == 1280 && initial_height == 720)
+  bool keep_ref_frames = flags & GS_SPS_KEEP_REF_FRAMES;
+  if (!keep_ref_frames && initial_width == 1280 && initial_height == 720)
     h264_stream->sps->level_idc = 32; // Max 5 buffered frames at 1280x720x60
-  else if (initial_width == 1920 && initial_height == 1080)
+  else if (!keep_ref_frames && initial_width == 1920 && initial_height == 1080)
     h264_stream->sps->level_idc = 42; // Max 4 buffered frames at 1920x1080x60
 
   // Some decoders requires a reference frame count of 1 to decode successfully.
-  h264_stream->sps->num_ref_frames = 1;
+  // Reference frame invalidation makes the host reference older frames, so it
+  // needs the stream's real count.
+  if (!keep_ref_frames)
+    h264_stream->sps->num_ref_frames = 1;
 
   // GFE 2.5.11 changed the SPS to add additional extensions
   // Some devices don't like these so we remove them here.
@@ -75,7 +81,7 @@ void gs_sps_fix(PLENTRY sps, int flags, uint8_t* out_buf, uint32_t* out_offset) 
     }
 
     // Some devices throw errors if max_dec_frame_buffering < num_ref_frames
-    h264_stream->sps->vui.max_dec_frame_buffering = 1;
+    h264_stream->sps->vui.max_dec_frame_buffering = h264_stream->sps->num_ref_frames;
 
     // These values are the default for the fields, but they are more aggressive
     // than what GFE sends in 2.5.11, but it doesn't seem to cause picture problems.

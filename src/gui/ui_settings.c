@@ -436,7 +436,7 @@ enum {
   SETTINGS_JP_LAYOUT,
   SETTINGS_SHOW_FPS,
   SETTINGS_LOCAL_AUDIO,
-  SETTINGS_ENABLE_FRAME_PACER,
+  SETTINGS_PERFORMANCE_MODE,
   SETTINGS_CENTER_REGION_ONLY,
   SETTINGS_ENABLE_MAPPING,
   SETTINGS_BACK_DEADZONE,
@@ -469,7 +469,7 @@ enum {
   SETTINGS_VIEW_JP_LAYOUT,
   SETTINGS_VIEW_SHOW_FPS,
   SETTINGS_VIEW_LOCAL_AUDIO,
-  SETTINGS_VIEW_ENABLE_FRAME_PACER,
+  SETTINGS_VIEW_PERFORMANCE_MODE,
   SETTINGS_VIEW_CENTER_REGION_ONLY,
   SETTINGS_VIEW_ENABLE_MAPPING,
   SETTINGS_VIEW_BACK_DEADZONE,
@@ -815,12 +815,12 @@ static int settings_loop(int id, void *context, const input_data *input) {
       did_change = 1;
       config.localaudio = !config.localaudio;
       break;
-    case SETTINGS_ENABLE_FRAME_PACER:
+    case SETTINGS_PERFORMANCE_MODE:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
         break;
       }
       did_change = 1;
-      config.enable_frame_pacer = !config.enable_frame_pacer;
+      config.performance_mode = !config.performance_mode;
       break;
     case SETTINGS_CENTER_REGION_ONLY:
       if ((input->buttons & config.btn_confirm) == 0 || input->buttons & SCE_CTRL_HOLD) {
@@ -948,8 +948,8 @@ static int settings_loop(int id, void *context, const input_data *input) {
   sprintf(current, "%s", config.localaudio ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_LOCAL_AUDIO, current);
 
-  sprintf(current, "%s", config.enable_frame_pacer ? "yes" : "no");
-  MENU_REPLACE(SETTINGS_VIEW_ENABLE_FRAME_PACER, current);
+  sprintf(current, "%s", config.performance_mode ? "yes" : "no");
+  MENU_REPLACE(SETTINGS_VIEW_PERFORMANCE_MODE, current);
 
   sprintf(current, "%s", config.center_region_only ? "yes" : "no");
   MENU_REPLACE(SETTINGS_VIEW_CENTER_REGION_ONLY, current);
@@ -1024,17 +1024,17 @@ int ui_settings_menu() {
   MENU_ENTRY(SETTINGS_SOPS, SETTINGS_VIEW_SOPS, "Change graphical game settings for performance", "");
   MENU_ENTRY(SETTINGS_ENABLE_FRAME_INVAL, SETTINGS_VIEW_ENABLE_FRAME_INVAL, "Enable reference frame invalidation", "");
   MENU_ENTRY(SETTINGS_ENABLE_STREAM_OPTIMIZE, SETTINGS_VIEW_ENABLE_STREAM_OPTIMIZE, "Enable stream optimization", "");
-  MENU_ENTRY(SETTINGS_ENABLE_VITA_VBLANK_WAIT, SETTINGS_VIEW_ENABLE_VITA_VBLANK_WAIT, "Enable VITA vblank", "");
+  MENU_ENTRY(SETTINGS_ENABLE_VITA_VBLANK_WAIT, SETTINGS_VIEW_ENABLE_VITA_VBLANK_WAIT, "Sync to display (no tearing)", "");
 
 
-  MENU_ENTRY(SETTINGS_ENABLE_FRAME_PACER, SETTINGS_VIEW_ENABLE_FRAME_PACER, "Enable frame pacer", "");
+  MENU_ENTRY(SETTINGS_PERFORMANCE_MODE, SETTINGS_VIEW_PERFORMANCE_MODE, "Performance mode (444 MHz while streaming)", "");
   MENU_ENTRY(SETTINGS_LOCAL_AUDIO, SETTINGS_VIEW_LOCAL_AUDIO, "Enable local audio", "");
 
   MENU_CATEGORY("System");
   MENU_ENTRY(SETTINGS_SAVE_DEBUG_LOG, SETTINGS_VIEW_SAVE_DEBUG_LOG, "Enable debug log", "");
   MENU_ENTRY(SETTINGS_DISABLE_POWERSAVE, SETTINGS_VIEW_DISABLE_POWERSAVE, "Disable power save", "");
   MENU_ENTRY(SETTINGS_JP_LAYOUT, SETTINGS_VIEW_JP_LAYOUT, "Swap X & O for Moonlight", "");
-  MENU_ENTRY(SETTINGS_SHOW_FPS, SETTINGS_VIEW_SHOW_FPS, "Display streaming FPS", "");
+  MENU_ENTRY(SETTINGS_SHOW_FPS, SETTINGS_VIEW_SHOW_FPS, "Display streaming stats", "");
 
   MENU_CATEGORY("Input");
 
@@ -1110,7 +1110,7 @@ void ui_settings_save_config() {
   vita_debug_log("  disable_powersave = %d", config.disable_powersave);
   vita_debug_log("  jp_layout = %d", config.jp_layout);
   vita_debug_log("  localaudio = %d", config.localaudio);
-  vita_debug_log("  enable_frame_pacer = %d", config.enable_frame_pacer);
+  vita_debug_log("  performance_mode = %d", config.performance_mode);
   vita_debug_log("  center_region_only = %d", config.center_region_only);
   vita_debug_log("  enable_ref_frame_invalidation = %d", config.enable_ref_frame_invalidation);
   vita_debug_log("  stream.streamingRemotely = %d", config.stream.streamingRemotely);

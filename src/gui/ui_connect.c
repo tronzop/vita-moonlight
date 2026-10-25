@@ -96,6 +96,10 @@ void ui_connect_stream(int appId) {
   // Si se seleccionó una resolución específica, se mantiene; si es -1, se deja al host
   // (No se modifica config.stream.width/height aquí)
 
+  // Full-size packets on the LAN mean fewer of them to receive per frame;
+  // the internet path may not carry them.
+  config.stream.packetSize = config.stream.streamingRemotely ? 1024 : 1392;
+
   vita_debug_log("Running LiStartConnection...");
   ret = LiStartConnection(&server.serverInfo, &config.stream, &connection_callbacks,
                           video_callback, platform_get_audio(system),

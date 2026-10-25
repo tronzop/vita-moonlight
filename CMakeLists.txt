@@ -34,7 +34,7 @@ add_definitions(-DVERSION_MAJOR=${VERSION_MAJOR})
 add_definitions(-DVERSION_MINOR=${VERSION_MINOR})
 add_definitions(-DVERSION_PATCH=${VERSION_PATCH})
 
-set(CMAKE_C_FLAGS "-Wl,-q -g -std=gnu99 -D__vita__")
+set(CMAKE_C_FLAGS "-Wl,-q -g -O2 -std=gnu99 -D__vita__")
 
 
 

@@ -23,6 +23,9 @@
 #include <stdio.h>
 #include <opus/opus_multistream.h>
 #include <psp2/audioout.h>
+#include <psp2/kernel/cpu.h>
+#include <psp2/kernel/threadmgr.h>
+#include <stdbool.h>
 
 enum {
   VITA_AUDIO_INIT_OK        = 0,
@@ -33,15 +36,23 @@ enum {
 #define FRAME_SIZE 240
 #define VITA_SAMPLES 960
 #define BUFFER_SIZE (2 * VITA_SAMPLES)
+#define AUDIO_PRIORITY 66
 static int decode_offset;
-static int port;
+static int port = -1;
+static bool audio_thread_tuned;
 
 static int active_audio_thread = true;
 static OpusMSDecoder* decoder = NULL;
 
-static short buffer[BUFFER_SIZE];
+// sceAudioOutOutput keeps reading a buffer while it plays, so decode into the other one.
+static short buffers[2][BUFFER_SIZE];
+static int buffer_idx;
 
 static void vita_renderer_cleanup() {
+  if (port >= 0) {
+    sceAudioOutReleasePort(port);
+    port = -1;
+  }
   if (decoder != NULL) {
     opus_multistream_decoder_destroy(decoder);
     decoder = NULL;
@@ -68,6 +79,9 @@ static int vita_renderer_init(int audioConfiguration, POPUS_MULTISTREAM_CONFIGUR
       return VITA_AUDIO_ERROR_PORT;
   }
 
+  decode_offset = 0;
+  buffer_idx = 0;
+  audio_thread_tuned = false;
   vita_debug_log("open port 0x%x\n", port);
   return VITA_AUDIO_INIT_OK;
 }
@@ -76,6 +90,14 @@ static void vita_renderer_decode_and_play_sample(char* data, int length) {
   if (!data)
     return;
 
+  if (!audio_thread_tuned) {
+    SceUID self = sceKernelGetThreadId();
+    sceKernelChangeThreadPriority(self, AUDIO_PRIORITY);
+    sceKernelChangeThreadCpuAffinityMask(self, SCE_KERNEL_CPU_MASK_USER_2);
+    audio_thread_tuned = true;
+  }
+
+  short *buffer = buffers[buffer_idx];
   int decodeLen = opus_multistream_decode(decoder, data, length, buffer + 2 * decode_offset, FRAME_SIZE, 0);
   if (decodeLen > 0) {
     if (decodeLen != FRAME_SIZE)
@@ -86,6 +108,7 @@ static void vita_renderer_decode_and_play_sample(char* data, int length) {
       decode_offset = 0;
       if (active_audio_thread) {
         sceAudioOutOutput(port, buffer);
+        buffer_idx ^= 1;
       }
     }
   } else {

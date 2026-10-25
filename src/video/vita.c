@@ -29,6 +29,8 @@
 #include <Limelight.h>
 
 #include <stdbool.h>
+#include <psp2/kernel/cpu.h>
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/display.h>
@@ -46,7 +48,7 @@ extern void gs_sps_stop();
 extern double_click_tracker dc_tracker;
 
 void draw_streaming(vita2d_texture *frame_texture);
-void draw_fps();
+void draw_stats();
 void draw_indicators();
 
 enum {
@@ -57,8 +59,15 @@ enum {
   VITA_VIDEO_ERROR_ALLOC_MEM            = 0x80010004,
   VITA_VIDEO_ERROR_GET_MEMBASE          = 0x80010005,
   VITA_VIDEO_ERROR_CREATE_DEC           = 0x80010006,
-  VITA_VIDEO_ERROR_CREATE_PACER_THREAD  = 0x80010007,
+  VITA_VIDEO_ERROR_CREATE_RENDER_THREAD = 0x80010007,
 };
+
+// User thread priorities run from 64 (highest) to 191; the default is 160.
+#define VIDEO_DECODE_PRIORITY 64
+#define VIDEO_RENDER_PRIORITY 65
+
+// One texture being decoded into, one waiting to be shown, one being drawn.
+#define FRAME_TEXTURES 3
 
 #define DECODER_BUFFER_SIZE (128 * 1024)
 
@@ -83,16 +92,16 @@ enum VideoStatus {
   INIT_AVC_LIB,
   INIT_DECODER_MEMBLOCK,
   INIT_AVC_DEC,
-  INIT_FRAME_PACER_THREAD,
+  INIT_RENDER_THREAD,
 };
 
-vita2d_texture *frame_texture = NULL;
+static vita2d_texture *frame_textures[FRAME_TEXTURES] = {0};
 enum VideoStatus video_status = NOT_INIT;
 
 SceAvcdecCtrl *decoder = NULL;
 SceUID displayblock = -1;
 SceUID decoderblock = -1;
-SceUID pacer_thread = -1;
+SceUID render_thread = -1;
 SceVideodecQueryInitInfoHwAvcdec *init = NULL;
 SceAvcdecQueryDecoderInfo *decoder_info = NULL;
 
@@ -102,15 +111,40 @@ typedef struct {
   bool plus;
 } indicator_status;
 
-//static unsigned numframes;
-static bool active_video_thread = true;
-static bool active_pacer_thread = false;
+static volatile bool active_video_thread = true;
+static volatile bool active_render_thread = false;
 static indicator_status poor_net_indicator = {0};
 
-uint32_t frame_count = 0;
-uint32_t need_drop = 0;
-uint32_t curr_fps[2] = {0, 0};
-float carry = 0;
+static SceUID frame_ready_sema = -1;
+static SceUID frame_state_mutex = -1;
+static SceUID draw_mutex = -1;
+static int decode_idx = 0;
+static int pending_idx = -1;
+static int displayed_idx = -1;
+static bool decode_thread_tuned = false;
+
+// Counters only ever increase; the render thread turns them into per-second
+// deltas, so unsigned wraparound is harmless.
+typedef struct {
+  uint32_t received;
+  uint32_t net_dropped;
+  uint32_t decoded;
+  uint32_t rendered;
+  uint32_t skipped;
+  uint32_t bytes;
+  uint32_t decode_us;
+  uint32_t decode_us_max;
+  uint32_t rx_to_decoded_us;
+  uint32_t host_latency_tenths_ms;
+  uint32_t host_latency_frames;
+} video_stats;
+
+static video_stats stats_totals;
+static video_stats stats_last;
+static video_stats stats_window;
+static uint64_t stats_window_start;
+static uint32_t stats_rtt_ms;
+static int last_frame_number;
 
 typedef struct {
   unsigned int texture_width;
@@ -181,66 +215,107 @@ void update_scaling_settings(int width, int height) {
   printf("update_scaling_settings: image_scaling.region_y2 = %f\n", image_scaling.region_y2);
 }
 
-static int vita_pacer_thread_main(SceSize args, void *argp) {
-  // 1s
-  int wait = 1000000;
-  //float max_fps = 0;
-  //sceDisplayGetRefreshRate(&max_fps);
-  //if (config.stream.fps == 30) {
-  //  max_fps /= 2;
-  //}
-  int max_fps = config.stream.fps;
-  //uint64_t last_vblank_count = sceDisplayGetVcount();
-  uint64_t last_check_time = sceKernelGetSystemTimeWide();
-  //float carry = 0;
-  need_drop = 0;
-  frame_count = 0;
-  while (active_pacer_thread) {
-    //uint64_t curr_vblank_count = sceDisplayGetVcount();
-    //uint32_t vblank_fps = curr_vblank_count - last_vblank_count;
-    uint32_t curr_frame_count = frame_count;
-    frame_count = 0;
+static void tune_current_thread(int priority, int cpu_mask) {
+  SceUID self = sceKernelGetThreadId();
+  sceKernelChangeThreadPriority(self, priority);
+  sceKernelChangeThreadCpuAffinityMask(self, cpu_mask);
+}
 
-    if (!active_video_thread) {
-    //  carry = 0;
-    } else {
-      if (config.enable_frame_pacer && curr_frame_count > max_fps) {
-        //carry += curr_frame_count - max_fps;
-        //if (carry > 1) {
-        //  need_drop += (int)carry;
-        //  carry -= (int)carry;
-        //}
-        need_drop += curr_frame_count - max_fps;
-      }
-      //vita_debug_log("fps0/fps1/carry/need_drop: %u/%u/%f/%u\n",
-      //               curr_frame_count, vblank_fps, carry, need_drop);
+static void update_stats_window(void) {
+  uint64_t now = sceKernelGetProcessTimeWide();
+  if (now - stats_window_start < 1000000) {
+    return;
+  }
+  video_stats snap = stats_totals;
+#define STATS_DELTA(field) stats_window.field = snap.field - stats_last.field
+  STATS_DELTA(received);
+  STATS_DELTA(net_dropped);
+  STATS_DELTA(decoded);
+  STATS_DELTA(rendered);
+  STATS_DELTA(skipped);
+  STATS_DELTA(bytes);
+  STATS_DELTA(decode_us);
+  STATS_DELTA(rx_to_decoded_us);
+  STATS_DELTA(host_latency_tenths_ms);
+  STATS_DELTA(host_latency_frames);
+#undef STATS_DELTA
+  stats_window.decode_us_max = snap.decode_us_max;
+  stats_totals.decode_us_max = 0;
+  stats_last = snap;
+  stats_window_start = now;
+
+  uint32_t rtt, rtt_variance;
+  if (LiGetEstimatedRttInfo(&rtt, &rtt_variance)) {
+    stats_rtt_ms = rtt;
+  }
+}
+
+static void publish_decoded_frame(void) {
+  sceKernelLockMutex(frame_state_mutex, 1, NULL);
+  if (pending_idx >= 0) {
+    // The render thread never picked up the previous frame; show the newer one instead.
+    stats_totals.skipped++;
+  }
+  pending_idx = decode_idx;
+  for (int i = 0; i < FRAME_TEXTURES; i++) {
+    if (i != pending_idx && i != displayed_idx) {
+      decode_idx = i;
+      break;
+    }
+  }
+  sceKernelUnlockMutex(frame_state_mutex, 1);
+  sceKernelSignalSema(frame_ready_sema, 1);
+}
+
+static int vita_render_thread_main(SceSize args, void *argp) {
+  while (active_render_thread) {
+    SceUInt timeout = 100000;
+    if (sceKernelWaitSema(frame_ready_sema, 1, &timeout) < 0) {
+      continue;
     }
 
-    curr_fps[0] = curr_frame_count;
-    curr_fps[1] = max_fps;
-
-    //last_vblank_count = curr_vblank_count;
-    uint64_t curr_check_time = sceKernelGetSystemTimeWide();
-    uint32_t lapse = curr_check_time - last_check_time;
-    last_check_time = curr_check_time;
-    if (lapse > wait && (lapse - wait) < wait) {
-      //vita_debug_log("sleep: %d", wait * 2 - lapse);
-      sceKernelDelayThread(wait * 2 - lapse);
-    } else {
-      sceKernelDelayThread(wait);
+    sceKernelLockMutex(frame_state_mutex, 1, NULL);
+    int idx = pending_idx;
+    pending_idx = -1;
+    displayed_idx = idx;
+    sceKernelUnlockMutex(frame_state_mutex, 1);
+    if (idx < 0) {
+      continue;
     }
+
+    sceKernelLockMutex(draw_mutex, 1, NULL);
+    if (active_video_thread) {
+      update_stats_window();
+
+      vita2d_start_drawing();
+      draw_streaming(frame_textures[idx]);
+      draw_stats();
+      draw_indicators();
+      vita2d_end_drawing();
+
+      vita2d_wait_rendering_done();
+      vita2d_swap_buffers();
+      stats_totals.rendered++;
+    }
+    sceKernelUnlockMutex(draw_mutex, 1);
+
+    sceKernelLockMutex(frame_state_mutex, 1, NULL);
+    displayed_idx = -1;
+    sceKernelUnlockMutex(frame_state_mutex, 1);
   }
   return 0;
 }
 
 static void vita_cleanup() {
-  if (video_status == INIT_FRAME_PACER_THREAD) {
-    active_pacer_thread = false;
+  if (video_status == INIT_RENDER_THREAD) {
+    active_render_thread = false;
+    sceKernelSignalSema(frame_ready_sema, 1);
     // wait 10sec
     SceUInt timeout = 10000000;
     int ret;
-    sceKernelWaitThreadEnd(pacer_thread, &ret, &timeout);
-    sceKernelDeleteThread(pacer_thread);
+    sceKernelWaitThreadEnd(render_thread, &ret, &timeout);
+    sceKernelDeleteThread(render_thread);
+    render_thread = -1;
     video_status--;
   }
 
@@ -276,9 +351,23 @@ static void vita_cleanup() {
   }
 
   if (video_status == INIT_FRAMEBUFFER) {
-    if (frame_texture != NULL) {
-      vita2d_free_texture(frame_texture);
-      frame_texture = NULL;
+    for (int i = 0; i < FRAME_TEXTURES; i++) {
+      if (frame_textures[i] != NULL) {
+        vita2d_free_texture(frame_textures[i]);
+        frame_textures[i] = NULL;
+      }
+    }
+    if (frame_ready_sema >= 0) {
+      sceKernelDeleteSema(frame_ready_sema);
+      frame_ready_sema = -1;
+    }
+    if (frame_state_mutex >= 0) {
+      sceKernelDeleteMutex(frame_state_mutex);
+      frame_state_mutex = -1;
+    }
+    if (draw_mutex >= 0) {
+      sceKernelDeleteMutex(draw_mutex);
+      draw_mutex = -1;
     }
 
     if (decoder_buffer != NULL) {
@@ -316,12 +405,33 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
       goto cleanup;
     } 
 
-    frame_texture = vita2d_create_empty_texture_format(image_scaling.texture_width, image_scaling.texture_height, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
-    if (frame_texture == NULL) {
-      printf("frame_texture: not enough memory\n");
+    for (int i = 0; i < FRAME_TEXTURES; i++) {
+      frame_textures[i] = vita2d_create_empty_texture_format(image_scaling.texture_width, image_scaling.texture_height, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
+      if (frame_textures[i] == NULL) {
+        printf("frame_texture: not enough memory\n");
+        ret = VITA_VIDEO_ERROR_NO_MEM;
+        goto cleanup;
+      }
+    }
+
+    frame_ready_sema = sceKernelCreateSema("frame_ready", 0, 0, 1, NULL);
+    frame_state_mutex = sceKernelCreateMutex("frame_state", 0, 0, NULL);
+    draw_mutex = sceKernelCreateMutex("frame_draw", 0, 0, NULL);
+    if (frame_ready_sema < 0 || frame_state_mutex < 0 || draw_mutex < 0) {
+      printf("frame sync objects: 0x%x 0x%x 0x%x\n", frame_ready_sema, frame_state_mutex, draw_mutex);
       ret = VITA_VIDEO_ERROR_NO_MEM;
       goto cleanup;
     }
+    decode_idx = 0;
+    pending_idx = -1;
+    displayed_idx = -1;
+    decode_thread_tuned = false;
+    last_frame_number = 0;
+    memset(&stats_totals, 0, sizeof(stats_totals));
+    memset(&stats_last, 0, sizeof(stats_last));
+    memset(&stats_window, 0, sizeof(stats_window));
+    stats_window_start = sceKernelGetProcessTimeWide();
+    stats_rtt_ms = 0;
 
     printf("Initalized Framebuffer");
 
@@ -341,10 +451,15 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
     init->size = sizeof(SceVideodecQueryInitInfoHwAvcdec);
     init->horizontal = VITA_DECODER_RESOLUTION(width);
     init->vertical = VITA_DECODER_RESOLUTION(height);
-    init->numOfRefFrames = 4;
+    init->numOfRefFrames = config.enable_ref_frame_invalidation ? 16 : 4;
     init->numOfStreams = 1;
 
     ret = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, init);
+    if (ret < 0 && init->numOfRefFrames > 4) {
+      printf("sceVideodecInitLibrary 0x%x with %d ref frames, retrying with 4\n", ret, init->numOfRefFrames);
+      init->numOfRefFrames = 4;
+      ret = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, init);
+    }
     if (ret < 0) {
       printf("sceVideodecInitLibrary 0x%x\n", ret);
       ret = VITA_VIDEO_ERROR_INIT_LIB;
@@ -418,16 +533,16 @@ static int vita_setup(int videoFormat, int width, int height, int redrawRate, vo
   }
 
   if (video_status == INIT_AVC_DEC) {
-    // INIT_FRAME_PACER_THREAD
-    ret = sceKernelCreateThread("frame_pacer", vita_pacer_thread_main, 0, 0x10000, 0, 0, NULL);
+    // INIT_RENDER_THREAD
+    ret = sceKernelCreateThread("video_render", vita_render_thread_main, VIDEO_RENDER_PRIORITY, 0x10000, 0, SCE_KERNEL_CPU_MASK_USER_1, NULL);
     if (ret < 0) {
       printf("sceKernelCreateThread 0x%x\n", ret);
-      ret = VITA_VIDEO_ERROR_CREATE_PACER_THREAD;
+      ret = VITA_VIDEO_ERROR_CREATE_RENDER_THREAD;
       goto cleanup;
     }
-    pacer_thread = ret;
-    active_pacer_thread = true;
-    sceKernelStartThread(pacer_thread, 0, NULL);
+    render_thread = ret;
+    active_render_thread = true;
+    sceKernelStartThread(render_thread, 0, NULL);
     video_status++;
   }
 
@@ -439,6 +554,23 @@ cleanup:
 }
 
 static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
+  if (!decode_thread_tuned) {
+    // Called on moonlight-common-c's receive thread, which we don't create ourselves.
+    tune_current_thread(VIDEO_DECODE_PRIORITY, SCE_KERNEL_CPU_MASK_USER_0);
+    decode_thread_tuned = true;
+  }
+
+  stats_totals.received++;
+  stats_totals.bytes += decodeUnit->fullLength;
+  if (last_frame_number && decodeUnit->frameNumber > last_frame_number + 1) {
+    stats_totals.net_dropped += decodeUnit->frameNumber - last_frame_number - 1;
+  }
+  last_frame_number = decodeUnit->frameNumber;
+  if (decodeUnit->frameHostProcessingLatency) {
+    stats_totals.host_latency_tenths_ms += decodeUnit->frameHostProcessingLatency;
+    stats_totals.host_latency_frames++;
+  }
+
   SceAvcdecAu au = {0};
   SceAvcdecArrayPicture array_picture = {0};
   struct SceAvcdecPicture picture = {0};
@@ -446,14 +578,12 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   array_picture.numOfElm = 1;
   array_picture.pPicture = &pictures;
 
-  //frame->time = decodeUnit->receiveTimeMs;
-
   picture.size = sizeof(picture);
   picture.frame.pixelType = 0;
   picture.frame.framePitch = image_scaling.texture_width;
   picture.frame.frameWidth = image_scaling.texture_width;
   picture.frame.frameHeight = image_scaling.texture_height;
-  picture.frame.pPicture[0] = vita2d_texture_get_datap(frame_texture);
+  picture.frame.pPicture[0] = vita2d_texture_get_datap(frame_textures[decode_idx]);
 
   //ensure_buf_size((void *)&decoder_buffer, &decoder_buffer_size, decodeUnit->fullLength + 64);
 
@@ -477,7 +607,7 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   uint32_t length = 0;
   while (entry != NULL) {
     if (entry->bufferType == BUFFER_TYPE_SPS) {
-      gs_sps_fix(entry, GS_SPS_BITSTREAM_FIXUP, decoder_buffer, &length);
+      gs_sps_fix(entry, GS_SPS_BITSTREAM_FIXUP | (config.enable_ref_frame_invalidation ? GS_SPS_KEEP_REF_FRAMES : 0), decoder_buffer, &length);
     } else {
       memcpy(decoder_buffer+length, entry->data, entry->length);
       length += entry->length;
@@ -486,50 +616,33 @@ static int vita_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   }
 
   au.es.pBuf = decoder_buffer;
-  au.es.size = decodeUnit->fullLength;
+  // The rewritten SPS is longer than the original, so use the bytes actually copied.
+  au.es.size = length;
   au.dts.lower = 0xFFFFFFFF;
   au.dts.upper = 0xFFFFFFFF;
   au.pts.lower = 0xFFFFFFFF;
   au.pts.upper = 0xFFFFFFFF;
 
-  int ret = 0;
-  ret = sceAvcdecDecode(decoder, &au, &array_picture);
+  uint64_t decode_start = sceKernelGetProcessTimeWide();
+  int ret = sceAvcdecDecode(decoder, &au, &array_picture);
+  uint32_t decode_us = sceKernelGetProcessTimeWide() - decode_start;
   if (ret < 0) {
     printf("sceAvcdecDecode (len=0x%x): 0x%x numOfOutput %d\n", decodeUnit->fullLength, ret, array_picture.numOfOutput);
     return DR_NEED_IDR;
   }
 
   if (array_picture.numOfOutput != 1) {
-    //printf("numOfOutput %d\n", array_picture.numOfOutput);
     return DR_OK;
   }
 
-  //TODO: Seems silly to decode the unit if we're going to drop the frame?
-  // Find out why we decode or if we even need to
-  if (active_video_thread) {
-    if (need_drop > 0) {
-      vita_debug_log("remain frameskip: %d\n", need_drop);
-      // skip
-      need_drop--;
-    } else {
-      vita2d_start_drawing();
-
-      draw_streaming(frame_texture);
-      draw_fps();
-      draw_indicators();
-
-      vita2d_end_drawing();
-
-      vita2d_wait_rendering_done();
-      vita2d_swap_buffers();
-
-      frame_count++;
-    }
+  stats_totals.decoded++;
+  stats_totals.decode_us += decode_us;
+  if (decode_us > stats_totals.decode_us_max) {
+    stats_totals.decode_us_max = decode_us;
   }
+  stats_totals.rx_to_decoded_us += LiGetMicroseconds() - decodeUnit->receiveTimeUs;
 
-  // if (numframes++ % 6 == 0)
-  //   return DR_NEED_IDR;
-
+  publish_decoded_frame();
   return DR_OK;
 }
 
@@ -545,10 +658,24 @@ void draw_streaming(vita2d_texture *frame_texture) {
                            image_scaling.region_y2);
 }
 
-void draw_fps() {
-  if (config.show_fps) {
-    vita2d_font_draw_textf(font, 40, 20, RGBA8(0xFF, 0xFF, 0xFF, 0xFF), 16, "fps: %u / %u", curr_fps[0], curr_fps[1]);
+void draw_stats() {
+  if (!config.show_fps) {
+    return;
   }
+  const video_stats *w = &stats_window;
+  uint32_t decoded = w->decoded ? w->decoded : 1;
+  double host_ms = w->host_latency_frames ? w->host_latency_tenths_ms / 10.0 / w->host_latency_frames : 0;
+  unsigned int color = RGBA8(0xFF, 0xFF, 0xFF, 0xFF);
+
+  vita2d_draw_rectangle(30, 4, 640, 44, RGBA8(0, 0, 0, 0xA0));
+  vita2d_font_draw_textf(font, 40, 20, color, 16,
+                         "fps %u rx / %u dec / %u shown   lost %u  skipped %u   %.1f Mbps",
+                         w->received, w->decoded, w->rendered, w->net_dropped, w->skipped,
+                         w->bytes * 8 / 1000000.0);
+  vita2d_font_draw_textf(font, 40, 40, color, 16,
+                         "decode %.1f ms (max %.1f)   rx->decoded %.1f ms   host %.1f ms   rtt %u ms",
+                         w->decode_us / 1000.0 / decoded, w->decode_us_max / 1000.0,
+                         w->rx_to_decoded_us / 1000.0 / decoded, host_ms, stats_rtt_ms);
 }
 
 void draw_indicators() {
@@ -573,8 +700,13 @@ void vitavideo_start() {
 }
 
 void vitavideo_stop() {
-  vita2d_set_vblank_wait(true);
   active_video_thread = false;
+  // Wait out a frame that is mid-draw so the UI gets vita2d to itself.
+  if (draw_mutex >= 0) {
+    sceKernelLockMutex(draw_mutex, 1, NULL);
+    sceKernelUnlockMutex(draw_mutex, 1);
+  }
+  vita2d_set_vblank_wait(true);
 }
 
 void vitavideo_show_poor_net_indicator() {

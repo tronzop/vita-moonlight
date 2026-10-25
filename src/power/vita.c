@@ -21,6 +21,7 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/power.h>
 #include "../config.h"
+#include "../debug.h"
 
 enum {
   ENABLE_ALL = 0,
@@ -29,6 +30,11 @@ enum {
 
 static int powermode = ENABLE_ALL;
 static bool active_power_thread = false;
+
+static struct {
+  bool saved;
+  int arm, bus, gpu, gpu_xbar;
+} stock_clocks;
 
 int vitapower_thread(SceSize args, void *argp) {
   while (1) {
@@ -65,10 +71,43 @@ void vitapower_config(CONFIGURATION config) {
   }
 }
 
+static void boost_clocks() {
+  if (!config.performance_mode || stock_clocks.saved) {
+    return;
+  }
+  stock_clocks.arm = scePowerGetArmClockFrequency();
+  stock_clocks.bus = scePowerGetBusClockFrequency();
+  stock_clocks.gpu = scePowerGetGpuClockFrequency();
+  stock_clocks.gpu_xbar = scePowerGetGpuXbarClockFrequency();
+  stock_clocks.saved = true;
+
+  scePowerSetArmClockFrequency(444);
+  scePowerSetBusClockFrequency(222);
+  scePowerSetGpuClockFrequency(222);
+  scePowerSetGpuXbarClockFrequency(166);
+  vita_debug_log("clocks boosted: arm %d bus %d gpu %d xbar %d (stock %d/%d/%d/%d)\n",
+                 scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
+                 scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency(),
+                 stock_clocks.arm, stock_clocks.bus, stock_clocks.gpu, stock_clocks.gpu_xbar);
+}
+
+static void restore_clocks() {
+  if (!stock_clocks.saved) {
+    return;
+  }
+  scePowerSetArmClockFrequency(stock_clocks.arm);
+  scePowerSetBusClockFrequency(stock_clocks.bus);
+  scePowerSetGpuClockFrequency(stock_clocks.gpu);
+  scePowerSetGpuXbarClockFrequency(stock_clocks.gpu_xbar);
+  stock_clocks.saved = false;
+}
+
 void vitapower_start() {
   active_power_thread = true;
+  boost_clocks();
 }
 
 void vitapower_stop() {
   active_power_thread = false;
+  restore_clocks();
 }

@@ -108,8 +108,8 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->sops = BOOL(value);
     } else if (strcmp(name, "localaudio") == 0) {
       config->localaudio = BOOL(value);
-    } else if (strcmp(name, "enable_frame_pacer") == 0) {
-      config->enable_frame_pacer = BOOL(value);
+    } else if (strcmp(name, "performance_mode") == 0) {
+      config->performance_mode = BOOL(value);
     } else if (strcmp(name, "center_region_only") == 0) {
       config->center_region_only = BOOL(value);
     } else if (strcmp(name, "disable_powersave") == 0) {
@@ -128,7 +128,7 @@ static int ini_handle(void *out, const char *section, const char *name,
       config->enable_ref_frame_invalidation = BOOL(value);
     } else if (strcmp(name, "enable_remote_stream_optimization") == 0) {
       config->stream.streamingRemotely = INT(value);
-    } else if (strcmp(name, "enable_vita_vblank_wait") == 0) {
+    } else if (strcmp(name, "enable_vsync") == 0) {
       config->enable_vita_vblank_wait = BOOL(value);
     } else if (strcmp(name, "enable_motion_controls") == 0) {
       config->enable_motion_controls = BOOL(value);
@@ -183,7 +183,7 @@ void config_save(const char* filename, PCONFIGURATION config) {
     write_config_int(fd, "fps", config->stream.fps);
   if (config->stream.bitrate != -1)
     write_config_int(fd, "bitrate", config->stream.bitrate);
-  if (config->stream.packetSize != 1024)
+  if (config->stream.packetSize != 1392)
     write_config_int(fd, "packetsize", config->stream.packetSize);
   if (!config->sops)
     write_config_bool(fd, "sops", config->sops);
@@ -194,7 +194,7 @@ void config_save(const char* filename, PCONFIGURATION config) {
     write_config_string(fd, "app", config->app);
 
   write_config_string(fd, "key_dir", config->key_dir); // Guardar key_dir en la raíz
-  write_config_bool(fd, "enable_frame_pacer", config->enable_frame_pacer);
+  write_config_bool(fd, "performance_mode", config->performance_mode);
   write_config_bool(fd, "center_region_only", config->center_region_only);
   write_config_bool(fd, "disable_powersave", config->disable_powersave);
   write_config_bool(fd, "jp_layout", config->jp_layout);
@@ -205,7 +205,7 @@ void config_save(const char* filename, PCONFIGURATION config) {
   write_config_int(fd, "mouse_acceleration", config->mouse_acceleration);
   write_config_bool(fd, "enable_ref_frame_invalidation", config->enable_ref_frame_invalidation);
   write_config_int(fd, "enable_remote_stream_optimization", config->stream.streamingRemotely);
-  write_config_bool(fd, "enable_vita_vblank_wait", config->enable_vita_vblank_wait);
+  write_config_bool(fd, "enable_vsync", config->enable_vita_vblank_wait);
   write_config_bool(fd, "enable_motion_controls", config->enable_motion_controls);
   write_config_bool(fd, "enable_psbutton_capture", config->enable_psbutton_capture);
   write_config_bool(fd, "enable_double_tap_sprint", config->enable_double_tap_sprint);
@@ -253,7 +253,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->stream.height = 720;
   config->stream.fps = 60;
   config->stream.bitrate = -1;
-  config->stream.packetSize = 1024;
+  config->stream.packetSize = 1392;
   config->stream.streamingRemotely = 0;
   config->stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
   config->stream.supportedVideoFormats = VIDEO_FORMAT_H264;
@@ -272,7 +272,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
   config->disable_powersave = true;
   config->jp_layout = false;
   config->show_fps = false;
-  config->enable_frame_pacer = true;
+  config->performance_mode = true;
   config->center_region_only = false;
 
   config->enable_front_touchzones = false;
@@ -283,7 +283,7 @@ void config_parse(int argc, char* argv[], PCONFIGURATION config) {
 
   config->mouse_acceleration = 150;
   config->enable_ref_frame_invalidation = false;
-  config->enable_vita_vblank_wait = false;
+  config->enable_vita_vblank_wait = true;
   config->enable_psbutton_capture = true;
   config->enable_double_tap_sprint = false;
 

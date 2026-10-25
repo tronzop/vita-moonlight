@@ -66,7 +66,8 @@
 #include "debug.h"
 #include "check_dir.h"
 
-#define VITA_NET_MEM_SIZE 1 * 1024 * 1024
+// Socket receive buffers come out of this pool; the video socket asks for ~2.8 MB.
+#define VITA_NET_MEM_SIZE (4 * 1024 * 1024)
 
 SceNetInitParam net_param = {
   .memory = NULL,
